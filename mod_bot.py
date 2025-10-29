@@ -4,6 +4,18 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import re
 import os
+from flask import Flask
+from threading import Thread
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def keep_alive():
+    Thread(target=lambda: app.run(host='0.0.0.0', port=8080)).start()
+
 
 # ---- обработчик при добавлении в группу ----
 async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -28,6 +40,9 @@ OWNER_ID = 1821129664  # твой Telegram ID
 # Чёрный список слов
 blacklist = {"реклама", "ставки", "казино", "вк", "крипта"}
 
+# куски слов — будут матчиться внутри токенов
+parts_blacklist = {"работ", "шабаш"}  # пример: "работ" поймает "работа","подработка", "работе"
+
 # Белый список пользователей
 whitelist = {OWNER_ID}
 
@@ -44,12 +59,35 @@ def is_admin(user_id: int, chat):
     except Exception:
         return False
 
-def contains_blacklisted_word(text: str):
-    """Проверяет, есть ли в тексте слова из чёрного списка"""
+_word_re = re.compile(r"\w+", flags=re.UNICODE)  # для токенизации (русские буквы входят в \w)
+    
+def contains_blacklisted_word(text: str) -> bool:
+    """
+    Возвращает True если:
+        - найдено точное слово из blacklist (по границам слова), или
+        - найден кусок из parts_blacklist внутри любого токена (word).
+    """
+    if not text:
+        return False
+    
     text_lower = text.lower()
-    for word in blacklist:
-        if re.search(rf"\b{re.escape(word)}\b", text_lower):
+    
+    # 1) exact word match (с границами)
+    # собираем одну regexp из blacklist для эффективности (если нужно часто пересобирать, можно кэшировать)
+    if blacklist:
+        # пример: r"\b(реклама|ставки|казино)\b"
+        exact_pattern = re.compile(r"\b(" + "|".join(re.escape(w) for w in blacklist) + r")\b", flags=re.IGNORECASE | re.UNICODE)
+        if exact_pattern.search(text_lower):
             return True
+    
+    # 2) parts match: разбиваем на токены и смотрим, содержит ли токен кусок
+    if parts_blacklist:
+        tokens = _word_re.findall(text_lower)  # ['это', 'пример', 'подработка']
+        for token in tokens:
+            for part in parts_blacklist:
+                if part and part in token:
+                    return True
+    
     return False
 
 # ==============================
@@ -137,31 +175,59 @@ async def unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
 
+async def list_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id, update.effective_chat):
+        return await update.message.reply_text("⛔ У вас нет прав.")
+    if not parts_blacklist:
+        return await update.message.reply_text("Частичные правила пусты.")
+    await update.message.reply_text("🔎 Части (parts) в чёрном списке:\n" + "\n".join(sorted(parts_blacklist)))
+
+async def add_part(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id, update.effective_chat):
+        return await update.message.reply_text("⛔ У вас нет прав.")
+    if not context.args:
+        return await update.message.reply_text("Использование: /addpart <кусок_слова> (например: /addpart работ)")
+    part = context.args[0].lower().strip()
+    parts_blacklist.add(part)
+    await update.message.reply_text(f"✅ Добавлен кусок: {part}")
+
+async def del_part(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id, update.effective_chat):
+        return await update.message.reply_text("⛔ У вас нет прав.")
+    if not context.args:
+        return await update.message.reply_text("Использование: /delpart <кусок_слова>")
+    part = context.args[0].lower().strip()
+    if part in parts_blacklist:
+        parts_blacklist.remove(part)
+        await update.message.reply_text(f"❎ Удалён кусок: {part}")
+    else:
+        await update.message.reply_text("🚫 Такого куска нет.")
+
 # ==============================
 # 🚫 Проверка сообщений
 # ==============================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if not msg or not msg.text:
+    if not msg:
+        return
+    if not msg.text and not msg.caption:
         return
 
+    text = (msg.text or msg.caption or "")
     user_id = msg.from_user.id
 
-    # Игнорируем белый список
     if user_id in whitelist:
         return
-
-    text = msg.text
 
     if contains_blacklisted_word(text):
         try:
             await msg.delete()
             await msg.chat.ban_member(user_id)
             await msg.chat.unban_member(user_id)
-            await msg.reply_text(f"🚫 Сообщение от {msg.from_user.first_name} удалено за запрещённое слово.")
-            print(f"❌ Заблокировано сообщение от {user_id}: {text}")
+            await msg.reply_text(f"🚫 Сообщение от {msg.from_user.first_name} удалено (запрещённое слово).")
+            print(f"Заблокировано: {user_id} — {text}")
         except Exception as e:
-            print(f"⚠️ Ошибка при удалении или бане: {e}")
+            print("Ошибка при удалении/бане:", e)
 
 # ==============================
 # 🚀 Запуск
@@ -178,6 +244,9 @@ def build_app():
     app.add_handler(CommandHandler("deluser", del_user))
     app.add_handler(CommandHandler("unban", unban_user))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CommandHandler("listparts", list_parts))
+    app.add_handler(CommandHandler("addpart", add_part))
+    app.add_handler(CommandHandler("delpart", del_part))    
 
     return app
 
@@ -194,8 +263,8 @@ def start_web():
         await site.start()
     asyncio.create_task(_run())
 
-if __name__ == "__main__":
-    app = build_app()
-    print("✅ Бот запущен и слушает команды...")
-    start_web()
-    app.run_polling()
+    if __name__ == "__main__":
+        keep_alive()
+        app = build_app()
+        print("Бот запущен")
+        app.run_polling()
