@@ -1,3 +1,5 @@
+from aiohttp import web
+import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import re
@@ -179,8 +181,21 @@ def build_app():
 
     return app
 
+async def handle(request):
+    return web.Response(text="ok")
+
+def start_web():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    async def _run():
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", "3000")))
+        await site.start()
+    asyncio.create_task(_run())
 
 if __name__ == "__main__":
     app = build_app()
     print("✅ Бот запущен и слушает команды...")
+    start_web()
     app.run_polling()
