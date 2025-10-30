@@ -4,7 +4,7 @@ import re
 import asyncio
 import logging
 from typing import Set
-
+from telegram.ext import ChatMemberHandler
 from aiohttp import web
 from telegram import Update
 from telegram.ext import (
@@ -84,26 +84,42 @@ def contains_blacklisted_word(text: str) -> bool:
 # ==============================
 # Приветствие при добавлении бота
 # ==============================
-async def bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.message.chat
-    # Вставлено оригинальное художественное приветствие из твоего кода
-    text = (
-        f"👋 Ну чтож, видать в {chat.title} всё стало настолько плохо с мошенниками, что ваше правительство соизволило позвать Меня!!!\n\n"
-        "Будем знакомы, Хуленсио Вингардио III, можно просто: Диктатор.\n"
-        "Меня зовут туда, где царит беззаконие капиталистического спама. Но не переживайте, став вашим Вождём я смогу привести это место в порядок\n"
-        "Вот мой первый указ: должность модератора упраздняется: вы мне будете нужны в комитете цензуры. Запретить или разрешить слово можно через встроенные команды. Я не люблю возиться со всеми этими директивами, извините.\n"
-        "Также вы можете создать элиту тех, на кого цензура действовать не будет (по умолчанию туда входят все сотрудники Комитета)\n"
-        "А если ты, гражданин заметил как кто-то обманывает систему и продолжает писать крамолу, немедленно свяжись с сотрудником Комитета цензуры (модератором)!\n"
-        "Полный список команд - /help\n\n"
-        "А теперь остались формальности. Назначьте меня своим диктатором, выдав права администратора."
-    )
-    await update.message.reply_text(text)
+async def my_chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Получаем событие изменения статуса бота в чате.
+    Когда бот сам добавлен (новый статус member/administrator/creator) — шлём приветствие.
+    """
+    try:
+        # update.my_chat_member присутствует для ChatMember updates
+        new = update.my_chat_member.new_chat_member
+        # проверим, что обновление относится к боту
+        if new.user and new.user.is_bot:
+            status = new.status  # например: 'member' или 'administrator'
+            if status in ("member", "administrator", "creator"):
+                chat = update.effective_chat
+                text = (
+                    f"👋 Ну чтож, видать в {chat.title} всё стало настолько плохо с мошенниками, "
+                    "что ваше правительство соизволило позвать Меня!!!\n\n"
+                    "Будем знакомы, Хуленсио Вингардио III, можно просто: Диктатор.\n"
+                    "Меня зовут туда, где царит беззаконие капиталистического спама. Но не переживайте, став вашим Вождём я смогу привести это место в порядок\n"
+                    "Вот мой первый указ: должность модератора упраздняется: вы мне будете нужны в комитете цензуры. Запретить или разрешить слово можно через встроенные команды. Я не люблю возиться со всеми этими директивами, извините.\n"
+                    "Также вы можете создать элиту тех, на кого цензура действовать не будет (по умолчанию туда входят все сотрудники Комитета)\n"
+                    "А если ты, гражданин заметил как кто-то обманывает систему и продолжает писать крамолу, немедленно свяжись с сотрудником Комитета цензуры (модератором)!\n"
+                    "Полный список команд - /help\n\n"
+                    "А теперь остались формальности. Назначьте меня своим диктатором, выдав права администратора."
+                )
+                await context.bot.send_message(chat_id=chat.id, text=text)
+    except Exception as e:
+        log.exception("my_chat_member_handler error: %s", e)
 
 
 # ==============================
 # 💬 Обработчики команд
 # ==============================
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        log.info("Help command from user %s in chat %s", update.effective_user.id, update.effective_chat.id if update.effective_chat else None)
+    ...    
     await update.message.reply_text(
         "📋 Доступные команды:\n"
         "/help — показать это сообщение\n"
@@ -128,6 +144,9 @@ async def show_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def add_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def add_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        log.info("Add new word to blacklist from user %s in chat %s", update.effective_user.id, update.effective_chat.id if update.effective_chat else None)
+    ...    
     if not await is_admin(update.effective_user.id, update.effective_chat):
         return await update.message.reply_text("Только админы могут менять ЧС.")
     if not context.args:
@@ -158,6 +177,9 @@ async def list_parts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def add_part(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def add_part(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        log.info("Adding new part of ban word from user %s in chat %s", update.effective_user.id, update.effective_chat.id if update.effective_chat else None)
+    ...    
     if not await is_admin(update.effective_user.id, update.effective_chat):
         return await update.message.reply_text("Только админы.")
     if not context.args:
@@ -295,6 +317,7 @@ def build_application():
     app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     # добавляем приветствие, когда бота добавляют
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, bot_added_to_group))
+    app.add_handler(ChatMemberHandler(my_chat_member_handler, ChatMemberHandler.MY_CHAT_MEMBER))    
 
     # post_init — запуск keep-alive сервера в фоновом таске
     async def _post_init(application):
